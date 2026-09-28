@@ -1,0 +1,769 @@
+// FinControl — schema Prisma
+//
+// Convenções gerais:
+// - Toda tabela com dado de empresa carrega `empresaId` e é protegida por
+//   Row-Level Security no Postgres (ver docs/adr/0002-multi-tenancy-isolation.md).
+//   O Prisma não gerencia RLS: as policies são criadas em uma migration SQL
+//   manual logo após a migration que cria estas tabelas.
+// - Dinheiro é sempre `Decimal`, nunca Float/Int — ver requisito de NFR.
+// - Datas de negócio (`Datetime`) são gravadas em UTC; a conversão para
+//   America/Sao_Paulo acontece na apresentação, nunca no banco.
+// - A camada analítica (schema `analytics`) tem só `dim_tempo` como tabela real
+//   aqui — o restante (dimensões-view e fatos materializados) é criado via SQL
+//   puro em prisma/sql/analytics/*.sql, pois o Prisma não gerencia views
+//   materializadas. Ver docs/adr/0004-analytical-layer-modeling.md.
+
+generator client {
+  provider        = "prisma-client-js"
+  // multiSchema: confirmar na Fase 0 se ainda é preview feature na versão do
+  // Prisma instalada, ou se já foi promovida a GA (nesse caso, remover a linha).
+  previewFeatures = ["multiSchema"]
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+  schemas  = ["public", "analytics"]
+}
+
+// ---------------------------------------------------------------------------
+// Núcleo: empresas, usuários, papéis, sessões, auditoria
+// ---------------------------------------------------------------------------
+
+model Empresa {
+  id        String   @id @default(uuid())
+  nome      String
+  documento String   @unique // CNPJ
+  timezone  String   @default("America/Sao_Paulo")
+
+  // Tolerância de inadimplência configurável por empresa (dias após o
+  // vencimento até um título a receber contar como inadimplente nos
+  // indicadores). Confirmado com o usuário: padrão de 1 dia.
+  toleranciaInadimplenciaDias Int @default(1)
+
+  ativo     Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  memberships       Membership[]
+  categorias        Categoria[]
+  centrosCusto      CentroCusto[]
+  clientesFornecedores ClienteFornecedor[]
+  contasBancarias   ContaBancaria[]
+  bankConnections   BankConnection[]
+  titulos           Titulo[]
+  insumos           Insumo[]
+  regrasCategorizacao RegraCategorizacao[]
+  auditLogs         AuditLog[]
+  alertasConfig     AlertaConfig[]
+  alertasDisparados AlertaDisparado[]
+
+  @@map("empresas")
+  @@schema("public")
+}
+
+enum MembershipRole {
+  OWNER
+  FINANCEIRO
+  ANALISTA
+
+  @@schema("public")
+}
+
+// Relação N:N entre usuário e empresa — um usuário pode ter acesso a várias
+// empresas (ex.: contador que atende múltiplos clientes), com papel
+// independente em cada uma. O usuário "troca de contexto" entre memberships.
+model Membership {
+  id        String         @id @default(uuid())
+  userId    String
+  empresaId String
+  role      MembershipRole
+  ativo     Boolean        @default(true)
+  createdAt DateTime       @default(now())
+
+  user    User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  empresa Empresa @relation(fields: [empresaId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, empresaId])
+  @@map("memberships")
+  @@schema("public")
+}
+
+model User {
+  id           String   @id @default(uuid())
+  email        String   @unique
+  nome         String
+  senhaHash    String
+  ativo        Boolean  @default(true)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  memberships     Membership[]
+  refreshSessions RefreshSession[]
+  auditLogs       AuditLog[]
+
+  @@map("users")
+  @@schema("public")
+}
+
+// Uma sessão por dispositivo/login, permitindo revogação individual na tela
+// de "sessões ativas" (decisão confirmada, em vez de só logout global).
+model RefreshSession {
+  id               String    @id @default(uuid())
+  userId           String
+  refreshTokenHash String    @unique
+  deviceLabel      String // ex.: "Chrome em Windows", preenchido a partir do User-Agent
+  ip               String?
+  criadoEm         DateTime  @default(now())
+  expiraEm         DateTime
+  revogadoEm       DateTime?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("refresh_sessions")
+  @@schema("public")
+}
+
+enum AuditAcao {
+  CREATE
+  UPDATE
+  DELETE
+  BAIXA
+  ESTORNO_SOLICITADO
+  ESTORNO_APROVADO
+  ESTORNO_REJEITADO
+
+  @@schema("public")
+}
+
+// Log de auditoria genérico para qualquer alteração em dado financeiro —
+// grava snapshot antes/depois em JSON em vez de uma tabela por entidade, para
+// não precisar de uma tabela de auditoria nova a cada novo módulo.
+model AuditLog {
+  id         String    @id @default(uuid())
+  empresaId  String
+  entidade   String // ex.: "Titulo", "Baixa", "Insumo"
+  entidadeId String
+  acao       AuditAcao
+  antes      Json?
+  depois     Json?
+  userId     String?
+  createdAt  DateTime  @default(now())
+
+  empresa Empresa @relation(fields: [empresaId], references: [id], onDelete: Cascade)
+  user    User?   @relation(fields: [userId], references: [id])
+
+  @@index([empresaId, entidade, entidadeId])
+  @@map("audit_logs")
+  @@schema("public")
+}
+
+// ---------------------------------------------------------------------------
+// Cadastros
+// ---------------------------------------------------------------------------
+
+enum CategoriaTipo {
+  RECEITA
+  CUSTO
+  DESPESA
+
+  @@schema("public")
+}
+
+// Template global (sem empresaId), copiado para `Categoria` na criação da
+// empresa — acelera onboarding e mantém categorias conhecidas o suficiente
+// para os indicadores analíticos (decisão confirmada com o usuário).
+model CategoriaTemplate {
+  id             String            @id @default(uuid())
+  nome           String
+  tipo           CategoriaTipo
+  parentTemplateId String?
+  parentTemplate  CategoriaTemplate?  @relation("CategoriaTemplateHierarquia", fields: [parentTemplateId], references: [id])
+  filhas          CategoriaTemplate[] @relation("CategoriaTemplateHierarquia")
+
+  @@map("categoria_templates")
+  @@schema("public")
+}
+
+// Plano de contas / categorias hierárquicas por empresa. `origemTemplateId`
+// é só rastreabilidade (de qual template essa categoria veio); a árvore em si
+// é auto-referenciada por `parentId` e totalmente editável depois da cópia.
+model Categoria {
+  id               String    @id @default(uuid())
+  empresaId        String
+  nome             String
+  tipo             CategoriaTipo
+  parentId         String?
+  origemTemplateId String?
+  ativo            Boolean   @default(true)
+
+  empresa Empresa     @relation(fields: [empresaId], references: [id], onDelete: Cascade)
+  parent  Categoria?  @relation("CategoriaHierarquia", fields: [parentId], references: [id])
+  filhas  Categoria[] @relation("CategoriaHierarquia")
+
+  titulos                       Titulo[]
+  transacoesSugeridas           TransacaoBancaria[] @relation("TransacaoCategoriaSugerida")
+  transacoesCategorizadas       TransacaoBancaria[] @relation("TransacaoCategoriaFinal")
+  regrasCategorizacao           RegraCategorizacao[]
+
+  @@index([empresaId])
+  @@map("categorias")
+  @@schema("public")
+}
+
+model CentroCusto {
+  id        String  @id @default(uuid())
+  empresaId String
+  nome      String
+  ativo     Boolean @default(true)
+
+  empresa         Empresa           @relation(fields: [empresaId], references: [id], onDelete: Cascade)
+  titulos         Titulo[]
+  insumoMovimentos InsumoMovimento[]
+
+  @@index([empresaId])
+  @@map("centros_custo")
+  @@schema("public")
+}
+
+enum ClienteFornecedorTipo {
+  CLIENTE
+  FORNECEDOR
+  AMBOS
+
+  @@schema("public")
+}
+
+model ClienteFornecedor {
+  id        String                 @id @default(uuid())
+  empresaId String
+  nome      String
+  documento String? // CPF/CNPJ, usado no matching de conciliação bancária
+  tipo      ClienteFornecedorTipo
+  email     String?
+  telefone  String?
+  ativo     Boolean                @default(true)
+
+  empresa Empresa  @relation(fields: [empresaId], references: [id], onDelete: Cascade)
+  titulos Titulo[]
+
+  @@index([empresaId])
+  @@map("clientes_fornecedores")
+  @@schema("public")
+}
+
+enum ContaBancariaOrigem {
+  MANUAL // alimentada por importação OFX/CSV
+  PLUGGY // vinculada a uma conexão Open Finance
+
+  @@schema("public")
+}
+
+enum ContaBancariaTipo {
+  CORRENTE
+  POUPANCA
+  CAIXA
+  CARTAO_CREDITO
+
+  @@schema("public")
+}
+
+// Conta bancária/caixa do ponto de vista do domínio — é a entidade usada em
+// baixas, saldo e projeção de caixa, independente da origem dos dados.
+// `origem` é fixada na criação e não muda: uma conta é OU Pluggy OU manual,
+// nunca as duas (decisão confirmada, evita duplicidade de transações).
+model ContaBancaria {
+  id           String              @id @default(uuid())
+  empresaId    String
+  nome         String
+  tipo         ContaBancariaTipo
+  origem       ContaBancariaOrigem
+  saldoAtual   Decimal             @db.Decimal(18, 2) @default(0) // cache, recalculado a cada baixa/transação
+  ativo        Boolean             @default(true)
+  createdAt    DateTime            @default(now())
+
+  empresa           Empresa            @relation(fields: [empresaId], references: [id], onDelete: Cascade)
+  bankAccountLink   BankAccountLink?
+  titulosPrevistos  Titulo[]
+  baixas            Baixa[]
+  transacoesBancarias TransacaoBancaria[]
+
+  @@index([empresaId])
+  @@map("contas_bancarias")
+  @@schema("public")
+}
+
+// ---------------------------------------------------------------------------
+// Integração bancária (Open Finance)
+// ---------------------------------------------------------------------------
+
+enum BankProvider {
+  PLUGGY
+  // BELVO no futuro — ver docs/adr/0003-banking-integration-adapter.md
+
+  @@schema("public")
+}
+
+enum BankConnectionStatus {
+  SYNCING // Item.status = UPDATING
+  ACTIVE // Item.status = UPDATED
+  LOGIN_ERROR // Item.status = LOGIN_ERROR — credenciais inválidas, requer reconexão
+  SYNC_ERROR // Item.status = OUTDATED — erro inesperado, pode tentar de novo
+  NEEDS_USER_INPUT // Item.status = WAITING_USER_INPUT — MFA pendente
+  CONSENT_EXPIRED
+  CONSENT_REVOKED
+  DELETED // conector descontinuado ou removido pelo usuário
+
+  @@schema("public")
+}
+
+// Wrapper de domínio em cima do "Item" do provedor (Pluggy). Nunca é
+// consultado diretamente pelo domínio de negócio — sempre através do
+// BankingProviderPort (ver ADR 0003).
+model BankConnection {
+  id                    String               @id @default(uuid())
+  empresaId             String
+  provider              BankProvider         @default(PLUGGY)
+  providerItemId        String // "itemId" na Pluggy
+  status                BankConnectionStatus @default(SYNCING)
+  requiresManualReauth  Boolean              @default(false) // true para conectores com MFA obrigatório a cada execução
+  consentExpiresAt      DateTime?
+  consentRevokedAt      DateTime?
+  lastSyncedAt          DateTime?
+  createdAt             DateTime             @default(now())
+
+  empresa      Empresa           @relation(fields: [empresaId], references: [id], onDelete: Cascade)
+  accountLinks BankAccountLink[]
+
+  @@unique([provider, providerItemId])
+  @@index([empresaId])
+  @@map("bank_connections")
+  @@schema("public")
+}
+
+// Ponte entre a conta do provedor e a ContaBancaria de domínio. Existe um
+// registro por conta que o usuário efetivamente escolheu importar — nem toda
+// conta retornada pelo Item vira uma ContaBancaria (decisão confirmada).
+model BankAccountLink {
+  id                String   @id @default(uuid())
+  bankConnectionId  String
+  providerAccountId String // "accountId" na Pluggy
+  contaBancariaId   String   @unique
+
+  bankConnection BankConnection @relation(fields: [bankConnectionId], references: [id], onDelete: Cascade)
+  contaBancaria  ContaBancaria  @relation(fields: [contaBancariaId], references: [id], onDelete: Cascade)
+
+  @@unique([bankConnectionId, providerAccountId])
+  @@map("bank_account_links")
+  @@schema("public")
+}
+
+enum TransacaoBancariaStatus {
+  PENDENTE // ainda não conciliada com nenhum título
+  CONCILIADA
+  IGNORADA // usuário marcou como não relevante (ex.: transferência entre contas próprias)
+
+  @@schema("public")
+}
+
+// Transação bruta sincronizada da Pluggy (ou de um import OFX/CSV — nesse
+// caso `providerTransactionId` é nulo e `dedupHash` garante idempotência).
+model TransacaoBancaria {
+  id                    String                  @id @default(uuid())
+  contaBancariaId       String
+  providerTransactionId String? // nulo para transações importadas manualmente
+  dedupHash             String // hash(contaBancariaId + data + valor + descricaoNormalizada), fallback de idempotência para OFX
+  data                  DateTime
+  valor                 Decimal                 @db.Decimal(18, 2) // negativo = saída, positivo = entrada
+  descricao             String
+  descricaoNormalizada  String
+  categoriaSugeridaId   String? // sugestão vinda da Pluggy ou de RegraCategorizacao
+  categoriaId           String? // categoria final, após confirmação/correção do usuário
+  status                TransacaoBancariaStatus @default(PENDENTE)
+  createdAt             DateTime                @default(now())
+
+  contaBancaria     ContaBancaria         @relation(fields: [contaBancariaId], references: [id], onDelete: Cascade)
+  // Duas FKs distintas para Categoria (sugestão automática x categoria final
+  // confirmada pelo usuário) — precisam de nome de relação explícito para o
+  // Prisma não confundir qual é qual.
+  categoriaSugerida Categoria?           @relation("TransacaoCategoriaSugerida", fields: [categoriaSugeridaId], references: [id])
+  categoria         Categoria?           @relation("TransacaoCategoriaFinal", fields: [categoriaId], references: [id])
+  sugestoes         ConciliacaoSugestao[]
+  baixa             Baixa?
+
+  @@unique([contaBancariaId, providerTransactionId])
+  @@unique([contaBancariaId, dedupHash])
+  @@index([contaBancariaId, status])
+  @@map("transacoes_bancarias")
+  @@schema("public")
+}
+
+enum ConciliacaoSugestaoStatus {
+  PENDENTE
+  CONFIRMADA
+  REJEITADA
+
+  @@schema("public")
+}
+
+// Sugestão de vínculo entre uma transação bancária e um título em aberto.
+// Nunca aplicada automaticamente — sempre exige confirmação manual (decisão
+// confirmada), mesmo com score de confiança máximo.
+model ConciliacaoSugestao {
+  id                  String                    @id @default(uuid())
+  transacaoBancariaId String
+  tituloId            String
+  score               Decimal                   @db.Decimal(5, 4) // 0 a 1, calculado por valor/data/favorecido/histórico
+  status              ConciliacaoSugestaoStatus @default(PENDENTE)
+  createdAt           DateTime                  @default(now())
+  resolvidoEm         DateTime?
+
+  transacaoBancaria TransacaoBancaria @relation(fields: [transacaoBancariaId], references: [id], onDelete: Cascade)
+  titulo            Titulo            @relation(fields: [tituloId], references: [id], onDelete: Cascade)
+
+  @@index([transacaoBancariaId, status])
+  @@index([tituloId, status])
+  @@map("conciliacao_sugestoes")
+  @@schema("public")
+}
+
+enum RegraCategorizacaoMatch {
+  CONTEM
+  REGEX
+  FAVORECIDO_EXATO
+
+  @@schema("public")
+}
+
+// Regras do usuário para categorização automática — têm prioridade sobre a
+// sugestão de IA da Pluggy (decisão confirmada).
+model RegraCategorizacao {
+  id          String                  @id @default(uuid())
+  empresaId   String
+  padrao      String
+  tipoMatch   RegraCategorizacaoMatch
+  categoriaId String
+  prioridade  Int                     @default(0)
+  ativo       Boolean                 @default(true)
+
+  empresa   Empresa   @relation(fields: [empresaId], references: [id], onDelete: Cascade)
+  categoria Categoria @relation(fields: [categoriaId], references: [id])
+
+  @@index([empresaId, ativo])
+  @@map("regras_categorizacao")
+  @@schema("public")
+}
+
+// ---------------------------------------------------------------------------
+// Operação financeira: títulos, baixas, estornos, recorrência, anexos
+// ---------------------------------------------------------------------------
+
+enum TituloTipo {
+  PAGAR
+  RECEBER
+
+  @@schema("public")
+}
+
+enum TituloStatus {
+  ABERTO
+  PARCIAL
+  PAGO
+  CANCELADO
+
+  @@schema("public")
+}
+
+enum RecorrenciaPeriodicidade {
+  MENSAL
+  SEMANAL
+  ANUAL
+
+  @@schema("public")
+}
+
+// Regra de recorrência. As ocorrências futuras são títulos de verdade,
+// gerados com antecedência por um horizonte rolante (job `recurring-generation`),
+// não calculados sob demanda — decisão confirmada, permite editar/cancelar
+// uma ocorrência específica sem afetar as demais.
+model Recorrencia {
+  id             String                   @id @default(uuid())
+  empresaId      String
+  periodicidade  RecorrenciaPeriodicidade
+  diaReferencia  Int // dia do mês/semana em que a ocorrência vence
+  dataInicio     DateTime
+  dataFim        DateTime?
+  valor          Decimal                  @db.Decimal(18, 2)
+  ativo          Boolean                  @default(true)
+
+  titulos Titulo[]
+
+  @@map("recorrencias")
+  @@schema("public")
+}
+
+// Conta a pagar/receber. Uma baixa parcial mantém o título "ABERTO"/"PARCIAL"
+// pelo saldo residual — não gera um novo título (decisão confirmada).
+model Titulo {
+  id                  String       @id @default(uuid())
+  empresaId           String
+  tipo                TituloTipo
+  descricao           String
+  valorOriginal       Decimal      @db.Decimal(18, 2)
+  saldoAberto         Decimal      @db.Decimal(18, 2) // decrementado a cada baixa; == valorOriginal enquanto ABERTO
+  categoriaId         String
+  centroCustoId       String?
+  clienteFornecedorId String?
+  contaBancariaPrevistaId String? // conta esperada para o pagamento/recebimento, usada na projeção de caixa
+  dataEmissao         DateTime
+  dataVencimento      DateTime
+  status              TituloStatus @default(ABERTO)
+  recorrenciaId       String?
+  parcelaAtual        Int?
+  parcelaTotal        Int?
+  createdAt           DateTime     @default(now())
+  updatedAt           DateTime     @updatedAt
+
+  empresa               Empresa             @relation(fields: [empresaId], references: [id], onDelete: Cascade)
+  categoria             Categoria           @relation(fields: [categoriaId], references: [id])
+  centroCusto           CentroCusto?        @relation(fields: [centroCustoId], references: [id])
+  clienteFornecedor     ClienteFornecedor?  @relation(fields: [clienteFornecedorId], references: [id])
+  contaBancariaPrevista ContaBancaria?      @relation(fields: [contaBancariaPrevistaId], references: [id])
+  recorrencia           Recorrencia?        @relation(fields: [recorrenciaId], references: [id])
+  baixas                Baixa[]
+  anexos                Anexo[]
+  sugestoesConciliacao  ConciliacaoSugestao[]
+  insumoMovimento       InsumoMovimento? // presente quando o título foi gerado automaticamente por uma compra de insumo
+
+  @@index([empresaId, status, dataVencimento])
+  @@map("titulos")
+  @@schema("public")
+}
+
+enum EstornoStatus {
+  PENDENTE
+  APROVADO
+  REJEITADO
+
+  @@schema("public")
+}
+
+// Baixa (pagamento/recebimento) de um título, com juros/multa/desconto
+// próprios daquela baixa (não do título como um todo).
+model Baixa {
+  id                  String    @id @default(uuid())
+  tituloId            String
+  valorPago           Decimal   @db.Decimal(18, 2)
+  juros               Decimal   @db.Decimal(18, 2) @default(0)
+  multa               Decimal   @db.Decimal(18, 2) @default(0)
+  desconto             Decimal   @db.Decimal(18, 2) @default(0)
+  data                DateTime
+  contaBancariaId     String
+  transacaoBancariaId String?   @unique // presente quando a baixa veio de uma conciliação confirmada
+  criadoPor           String
+  createdAt           DateTime  @default(now())
+  estornadaEm         DateTime? // preenchido só após a EstornoSolicitacao ser aprovada
+
+  titulo            Titulo             @relation(fields: [tituloId], references: [id], onDelete: Cascade)
+  contaBancaria     ContaBancaria      @relation(fields: [contaBancariaId], references: [id])
+  transacaoBancaria TransacaoBancaria? @relation(fields: [transacaoBancariaId], references: [id])
+  estornoSolicitacao EstornoSolicitacao?
+
+  @@index([tituloId])
+  @@map("baixas")
+  @@schema("public")
+}
+
+// Estorno exige aprovação de um segundo usuário owner/financeiro (decisão
+// confirmada — double-check). A baixa só é efetivamente revertida
+// (saldo do título e da conta bancária restaurados) quando `status = APROVADO`.
+model EstornoSolicitacao {
+  id            String        @id @default(uuid())
+  baixaId       String        @unique
+  motivo        String
+  solicitadoPor String
+  status        EstornoStatus @default(PENDENTE)
+  aprovadoPor   String?
+  aprovadoEm    DateTime?
+  createdAt     DateTime      @default(now())
+
+  baixa Baixa @relation(fields: [baixaId], references: [id], onDelete: Cascade)
+
+  @@map("estorno_solicitacoes")
+  @@schema("public")
+}
+
+model Anexo {
+  id           String   @id @default(uuid())
+  tituloId     String
+  url          String
+  nomeArquivo  String
+  tipoMime     String
+  tamanhoBytes Int
+  enviadoPor   String
+  createdAt    DateTime @default(now())
+
+  titulo Titulo @relation(fields: [tituloId], references: [id], onDelete: Cascade)
+
+  @@index([tituloId])
+  @@map("anexos")
+  @@schema("public")
+}
+
+// ---------------------------------------------------------------------------
+// Insumos internos (estoque de consumo — não de venda)
+// ---------------------------------------------------------------------------
+
+model UnidadeMedida {
+  id    String @id @default(uuid())
+  sigla String @unique // ex.: "UN", "CX", "KG"
+  nome  String
+
+  insumosBase        Insumo[]              @relation("InsumoUnidadeBase")
+  fatoresConversao    FatorConversaoUnidade[]
+  movimentos          InsumoMovimento[]
+
+  @@map("unidades_medida")
+  @@schema("public")
+}
+
+// Insumo de consumo interno. Estoque mínimo é global por empresa (decisão
+// confirmada), não por centro de custo.
+model Insumo {
+  id                    String  @id @default(uuid())
+  empresaId             String
+  nome                  String
+  unidadeMedidaBaseId   String
+  estoqueMinimo         Decimal @db.Decimal(18, 4)
+  estoqueAtual          Decimal @db.Decimal(18, 4) @default(0)
+  custoMedioPonderado   Decimal @db.Decimal(18, 4) @default(0) // na unidade base
+  ativo                 Boolean @default(true)
+
+  empresa          Empresa                 @relation(fields: [empresaId], references: [id], onDelete: Cascade)
+  unidadeMedidaBase UnidadeMedida          @relation("InsumoUnidadeBase", fields: [unidadeMedidaBaseId], references: [id])
+  fatoresConversao FatorConversaoUnidade[]
+  movimentos       InsumoMovimento[]
+
+  @@index([empresaId])
+  @@map("insumos")
+  @@schema("public")
+}
+
+// Fator de conversão entre a unidade de compra (ex.: "CX" = caixa) e a
+// unidade base de estoque/custo (ex.: "UN" = unidade) — decisão confirmada,
+// necessário porque fornecedor vende em uma unidade e o consumo é em outra.
+model FatorConversaoUnidade {
+  id              String  @id @default(uuid())
+  insumoId        String
+  unidadeMedidaId String
+  fator           Decimal @db.Decimal(18, 6) // quantas unidades base equivalem a 1 desta unidade
+
+  insumo        Insumo        @relation(fields: [insumoId], references: [id], onDelete: Cascade)
+  unidadeMedida UnidadeMedida @relation(fields: [unidadeMedidaId], references: [id])
+
+  @@unique([insumoId, unidadeMedidaId])
+  @@map("fatores_conversao_unidade")
+  @@schema("public")
+}
+
+enum InsumoMovimentoTipo {
+  ENTRADA
+  SAIDA
+
+  @@schema("public")
+}
+
+// Movimento de estoque. Uma ENTRADA originada de compra pode ter um
+// `tituloId` vinculado — vínculo rígido: editar a compra atualiza o título
+// aberto, excluir a compra exige excluir/cancelar o título junto (decisão
+// confirmada, aplicado na camada de serviço, não é uma constraint de banco).
+model InsumoMovimento {
+  id                  String               @id @default(uuid())
+  insumoId            String
+  tipo                InsumoMovimentoTipo
+  quantidade          Decimal              @db.Decimal(18, 4) // na unidade informada em `unidadeMedidaId`
+  unidadeMedidaId     String
+  quantidadeConvertida Decimal             @db.Decimal(18, 4) // já convertida para a unidade base do insumo
+  centroCustoId       String
+  custoUnitario       Decimal?             @db.Decimal(18, 4) // informado em ENTRADA, usado para recalcular o custo médio ponderado
+  tituloId            String?              @unique // presente quando a entrada gerou conta a pagar automaticamente
+  data                DateTime
+  criadoPor           String
+  createdAt           DateTime             @default(now())
+
+  insumo        Insumo        @relation(fields: [insumoId], references: [id], onDelete: Cascade)
+  unidadeMedida UnidadeMedida @relation(fields: [unidadeMedidaId], references: [id])
+  centroCusto   CentroCusto   @relation(fields: [centroCustoId], references: [id])
+  titulo        Titulo?       @relation(fields: [tituloId], references: [id])
+
+  @@index([insumoId, data])
+  @@map("insumo_movimentos")
+  @@schema("public")
+}
+
+// ---------------------------------------------------------------------------
+// Alertas
+// ---------------------------------------------------------------------------
+
+enum AlertaTipo {
+  SALDO_PROJETADO_NEGATIVO
+  DESPESA_FORA_DO_PADRAO
+  TITULO_VENCIDO
+  INSUMO_ABAIXO_DO_MINIMO
+  CONSENTIMENTO_EXPIRANDO
+  CONEXAO_BANCARIA_COM_ERRO
+
+  @@schema("public")
+}
+
+// Configuração por empresa de cada tipo de alerta (limiares, ligado/desligado).
+model AlertaConfig {
+  id        String     @id @default(uuid())
+  empresaId String
+  tipo      AlertaTipo
+  ativo     Boolean    @default(true)
+  parametros Json // ex.: { "desviosPadrao": 2 } para DESPESA_FORA_DO_PADRAO
+
+  empresa Empresa @relation(fields: [empresaId], references: [id], onDelete: Cascade)
+
+  @@unique([empresaId, tipo])
+  @@map("alerta_configs")
+  @@schema("public")
+}
+
+model AlertaDisparado {
+  id         String     @id @default(uuid())
+  empresaId  String
+  tipo       AlertaTipo
+  mensagem   String
+  contexto   Json // referências ao(s) registro(s) de origem (ex.: tituloId, insumoId)
+  lidoEm     DateTime?
+  createdAt  DateTime   @default(now())
+
+  empresa Empresa @relation(fields: [empresaId], references: [id], onDelete: Cascade)
+
+  @@index([empresaId, lidoEm])
+  @@map("alertas_disparados")
+  @@schema("public")
+}
+
+// ---------------------------------------------------------------------------
+// Camada analítica — apenas a dimensão de tempo é uma tabela real gerenciada
+// pelo Prisma (populada via seed). As demais dimensões são views e os fatos
+// são views materializadas, definidos em prisma/sql/analytics/*.sql — ver
+// docs/adr/0004-analytical-layer-modeling.md para o racional completo.
+// ---------------------------------------------------------------------------
+
+model DimTempo {
+  data          DateTime @id @db.Date
+  ano           Int
+  mes           Int
+  dia           Int
+  trimestre     Int
+  diaDaSemana   Int // 0 = domingo
+  nomeMes       String
+  ehFeriado     Boolean  @default(false)
+
+  @@map("dim_tempo")
+  @@schema("analytics")
+}

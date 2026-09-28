@@ -1,0 +1,32 @@
+# Documentação estratégica — fica só no disco local, não vai para o Git/GitHub.
+# Claude Code continua lendo esses arquivos normalmente (leitura é do
+# filesystem, não depende de rastreamento no Git).
+CLAUDE.md
+/docs/
+
+# Dependências
+node_modules/
+.pnpm-store/
+
+# Build outputs
+dist/
+build/
+.next/
+out/
+.turbo/
+src-tauri/target/
+.expo/
+.expo-shared/
+
+# Env e segredos
+.env
+.env.*
+!.env.example
+
+# Prisma
+prisma/migrations/dev.db
+
+# Logs e caches diversos
+*.log
+.DS_Store
+coverage/
