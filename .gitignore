@@ -23,10 +23,8 @@ src-tauri/target/
 .env.*
 !.env.example
 
-# Prisma
-prisma/migrations/dev.db
-
 # Logs e caches diversos
 *.log
 .DS_Store
 coverage/
+v8-compile-cache-*/

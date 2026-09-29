@@ -84,6 +84,8 @@ model Membership {
   user    User    @relation(fields: [userId], references: [id], onDelete: Cascade)
   empresa Empresa @relation(fields: [empresaId], references: [id], onDelete: Cascade)
 
+  refreshSessions RefreshSession[]
+
   @@unique([userId, empresaId])
   @@map("memberships")
   @@schema("public")
@@ -109,16 +111,22 @@ model User {
 // Uma sessão por dispositivo/login, permitindo revogação individual na tela
 // de "sessões ativas" (decisão confirmada, em vez de só logout global).
 model RefreshSession {
-  id               String    @id @default(uuid())
-  userId           String
-  refreshTokenHash String    @unique
-  deviceLabel      String // ex.: "Chrome em Windows", preenchido a partir do User-Agent
-  ip               String?
-  criadoEm         DateTime  @default(now())
-  expiraEm         DateTime
-  revogadoEm       DateTime?
+  id                  String    @id @default(uuid())
+  userId              String
+  // Empresa/papel ativos no momento do login — todo access token emitido a
+  // partir desta sessão (login e refreshes subsequentes) carrega este
+  // contexto. Trocar de empresa (troca de contexto confirmada) cria uma nova
+  // sessão em vez de mudar esta, preservando o histórico de "sessões ativas".
+  activeMembershipId String
+  refreshTokenHash    String    @unique
+  deviceLabel         String // ex.: "Chrome em Windows", preenchido a partir do User-Agent
+  ip                  String?
+  criadoEm            DateTime  @default(now())
+  expiraEm            DateTime
+  revogadoEm          DateTime?
 
-  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  user             User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  activeMembership Membership @relation(fields: [activeMembershipId], references: [id], onDelete: Cascade)
 
   @@map("refresh_sessions")
   @@schema("public")

@@ -1,0 +1,69 @@
+# Ambiente local completo — roda tudo em container, nada instalado no host.
+#
+# Uso do dia a dia:
+#   docker compose up -d postgres redis   # sobe só a infra
+#   docker compose up api                 # sobe a API (instala deps na primeira vez)
+#   docker compose run --rm api <comando> # roda qualquer comando pontual (lint, test, prisma...)
+#
+# node_modules e o store do pnpm vivem em volumes nomeados do Docker, nunca
+# no host — evita divergência de binário nativo entre o seu SO e o container
+# (relevante sobretudo para os engines do Prisma).
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: fincontrol
+      POSTGRES_PASSWORD: fincontrol
+      POSTGRES_DB: fincontrol
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U fincontrol -d fincontrol"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  api:
+    build:
+      context: .
+      dockerfile: docker/node.Dockerfile
+    working_dir: /workspace
+    command: sh -c "pnpm install && pnpm --filter @fincontrol/api start:dev"
+    environment:
+      NODE_ENV: development
+      DATABASE_URL: postgresql://fincontrol:fincontrol@postgres:5432/fincontrol?schema=public
+      REDIS_URL: redis://redis:6379
+      JWT_ACCESS_SECRET: dev-access-secret-troque-em-producao
+      JWT_REFRESH_SECRET: dev-refresh-secret-troque-em-producao
+    ports:
+      - "3000:3000"
+    volumes:
+      - .:/workspace
+      - pnpm_store:/home/node/.local/share/pnpm/store
+      - node_modules_root:/workspace/node_modules
+      - node_modules_api:/workspace/apps/api/node_modules
+      - node_modules_shared:/workspace/packages/shared/node_modules
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+volumes:
+  postgres_data:
+  pnpm_store:
+  node_modules_root:
+  node_modules_api:
+  node_modules_shared:
