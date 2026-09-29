@@ -1,8 +1,10 @@
-# Documentação estratégica — fica só no disco local, não vai para o Git/GitHub.
-# Claude Code continua lendo esses arquivos normalmente (leitura é do
-# filesystem, não depende de rastreamento no Git).
+# Documentação estratégica e config local do Claude Code — ficam só no disco
+# local, não vão para o Git/GitHub. Claude Code continua lendo/usando esses
+# arquivos normalmente (leitura e comandos customizados são do filesystem,
+# não dependem de rastreamento no Git).
 CLAUDE.md
 /docs/
+/.claude/
 
 # Dependências
 node_modules/
