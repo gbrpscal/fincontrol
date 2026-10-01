@@ -14,6 +14,7 @@ import type {
   Tokens,
 } from "@fincontrol/shared";
 import type { MembershipRole } from "@prisma/client";
+import { copiarPlanoDeContasPadrao } from "../cadastros/copiar-plano-de-contas-padrao";
 import { PrismaService } from "../prisma/prisma.service";
 import { PasswordService } from "./password.service";
 import { TokenService } from "./token.service";
@@ -62,6 +63,7 @@ export class AuthService {
       const membership = await tx.membership.create({
         data: { userId: user.id, empresaId: empresa.id, role: "OWNER" },
       });
+      await copiarPlanoDeContasPadrao(tx, empresa.id);
       return { user, empresa, membership };
     });
 

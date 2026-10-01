@@ -70,5 +70,8 @@ jobs:
       - name: Aplicar migrations
         run: pnpm db:migrate:deploy
 
+      - name: Seed (plano de contas padrão)
+        run: pnpm db:seed
+
       - name: Testes e2e (API)
         run: pnpm --filter @fincontrol/api test:e2e
