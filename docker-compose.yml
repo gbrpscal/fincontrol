@@ -43,7 +43,13 @@ services:
     command: sh -c "pnpm install && pnpm --filter @fincontrol/api start:dev"
     environment:
       NODE_ENV: development
+      # Usada só pelo Prisma CLI (migrate/generate) — role com privilégio de
+      # superusuário, precisa pra DDL (CREATE TABLE, CREATE POLICY etc).
       DATABASE_URL: postgresql://fincontrol:fincontrol@postgres:5432/fincontrol?schema=public
+      # Usada pelo PrismaService em runtime — role comum, sem BYPASSRLS, pra
+      # o Row-Level Security realmente valer (RLS nunca se aplica a
+      # superusuário). Ver prisma/migrations/20260930234235_create_app_role.
+      APP_DATABASE_URL: postgresql://fincontrol_app:fincontrol_app_dev_only@postgres:5432/fincontrol?schema=public
       REDIS_URL: redis://redis:6379
       JWT_ACCESS_SECRET: dev-access-secret-troque-em-producao
       JWT_REFRESH_SECRET: dev-refresh-secret-troque-em-producao
