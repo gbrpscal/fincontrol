@@ -51,6 +51,9 @@ services:
       # superusuário). Ver prisma/migrations/20260930234235_create_app_role.
       APP_DATABASE_URL: postgresql://fincontrol_app:fincontrol_app_dev_only@postgres:5432/fincontrol?schema=public
       REDIS_URL: redis://redis:6379
+      # Armazenamento local dos anexos em dev (adapter de disco). Em produção
+      # o adapter troca para S3/R2/MinIO via AnexoStoragePort.
+      ANEXOS_DIR: /workspace/.data/anexos
       JWT_ACCESS_SECRET: dev-access-secret-troque-em-producao
       JWT_REFRESH_SECRET: dev-refresh-secret-troque-em-producao
     ports:

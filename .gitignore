@@ -28,3 +28,6 @@ src-tauri/target/
 .DS_Store
 coverage/
 v8-compile-cache-*/
+
+# Arquivos enviados (anexos) no storage local de desenvolvimento
+.data/

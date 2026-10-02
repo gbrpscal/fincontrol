@@ -1,7 +1,10 @@
 import {
   atualizarTituloSchema,
   criarTituloSchema,
+  listarEstornosQuerySchema,
+  listarTitulosQuerySchema,
   registrarBaixaSchema,
+  rejeitarEstornoSchema,
   solicitarEstornoSchema,
 } from "./financeiro";
 
@@ -61,6 +64,32 @@ describe("atualizarTituloSchema", () => {
   });
 });
 
+describe("listarTitulosQuerySchema", () => {
+  it("aceita sem nenhum filtro", () => {
+    expect(listarTitulosQuerySchema.parse({})).toEqual({});
+  });
+
+  it("aceita faixa de vencimento válida e status/tipo do enum", () => {
+    const r = listarTitulosQuerySchema.parse({
+      tipo: "RECEBER",
+      status: "PARCIAL",
+      vencimentoDe: "2026-10-01",
+      vencimentoAte: "2026-10-31",
+    });
+    expect(r.status).toBe("PARCIAL");
+  });
+
+  it("rejeita faixa invertida e aponta vencimentoAte", () => {
+    const r = listarTitulosQuerySchema.safeParse({ vencimentoDe: "2026-11-01", vencimentoAte: "2026-10-01" });
+    expect(r.success).toBe(false);
+    if (!r.success) expect(r.error.issues[0]?.path).toEqual(["vencimentoAte"]);
+  });
+
+  it("rejeita status inexistente", () => {
+    expect(listarTitulosQuerySchema.safeParse({ status: "ATRASADO" }).success).toBe(false);
+  });
+});
+
 describe("registrarBaixaSchema", () => {
   const baixaValida = { valorPago: "400.00", data: "2026-10-05", contaBancariaId: ID };
 
@@ -75,6 +104,18 @@ describe("registrarBaixaSchema", () => {
 
   it("rejeita valorPago zero", () => {
     expect(registrarBaixaSchema.safeParse({ ...baixaValida, valorPago: "0" }).success).toBe(false);
+  });
+});
+
+describe("listarEstornosQuerySchema / rejeitarEstornoSchema", () => {
+  it("filtro de status só aceita valores do enum", () => {
+    expect(listarEstornosQuerySchema.safeParse({ status: "PENDENTE" }).success).toBe(true);
+    expect(listarEstornosQuerySchema.safeParse({ status: "CANCELADO" }).success).toBe(false);
+  });
+
+  it("rejeitar sem justificativa não passa", () => {
+    expect(rejeitarEstornoSchema.safeParse({ motivo: "não" }).success).toBe(false);
+    expect(rejeitarEstornoSchema.safeParse({ motivo: "Comprovante não confere" }).success).toBe(true);
   });
 });
 

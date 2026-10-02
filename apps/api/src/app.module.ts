@@ -3,6 +3,7 @@ import { ConfigModule } from "@nestjs/config";
 import { AuditModule } from "./audit/audit.module";
 import { AuthModule } from "./auth/auth.module";
 import { CadastrosModule } from "./cadastros/cadastros.module";
+import { FinanceiroModule } from "./financeiro/financeiro.module";
 import { HealthModule } from "./health/health.module";
 import { PrismaModule } from "./prisma/prisma.module";
 
@@ -14,6 +15,7 @@ import { PrismaModule } from "./prisma/prisma.module";
     AuthModule,
     AuditModule,
     CadastrosModule,
+    FinanceiroModule,
   ],
 })
 export class AppModule {}

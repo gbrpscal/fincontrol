@@ -42,6 +42,21 @@ export const atualizarTituloSchema = z
   });
 export type AtualizarTituloInput = z.infer<typeof atualizarTituloSchema>;
 
+export const tituloStatusSchema = z.enum(["ABERTO", "PARCIAL", "PAGO", "CANCELADO"]);
+
+export const listarTitulosQuerySchema = z
+  .object({
+    tipo: tituloTipoSchema.optional(),
+    status: tituloStatusSchema.optional(),
+    vencimentoDe: dataSchema.optional(),
+    vencimentoAte: dataSchema.optional(),
+  })
+  .refine(
+    (q) => q.vencimentoDe === undefined || q.vencimentoAte === undefined || q.vencimentoDe <= q.vencimentoAte,
+    { message: "vencimentoDe não pode ser depois de vencimentoAte.", path: ["vencimentoAte"] },
+  );
+export type ListarTitulosQuery = z.infer<typeof listarTitulosQuerySchema>;
+
 export const registrarBaixaSchema = z.object({
   valorPago: valorMonetarioPositivoSchema,
   juros: valorMonetarioSchema.default("0"),
@@ -56,3 +71,14 @@ export const solicitarEstornoSchema = z.object({
   motivo: z.string().trim().min(5).max(500),
 });
 export type SolicitarEstornoInput = z.infer<typeof solicitarEstornoSchema>;
+
+// Rejeitar também exige justificativa (fica só na auditoria).
+export const rejeitarEstornoSchema = solicitarEstornoSchema;
+export type RejeitarEstornoInput = SolicitarEstornoInput;
+
+export const estornoStatusSchema = z.enum(["PENDENTE", "APROVADO", "REJEITADO"]);
+
+export const listarEstornosQuerySchema = z.object({
+  status: estornoStatusSchema.optional(),
+});
+export type ListarEstornosQuery = z.infer<typeof listarEstornosQuerySchema>;

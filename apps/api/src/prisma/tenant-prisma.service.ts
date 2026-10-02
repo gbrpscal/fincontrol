@@ -1,5 +1,6 @@
 import { Inject, Injectable, Scope } from "@nestjs/common";
 import { REQUEST } from "@nestjs/core";
+import type { Prisma } from "@prisma/client";
 import type { Request } from "express";
 import type { AuthenticatedUser } from "../auth/types";
 import { PrismaService } from "./prisma.service";
@@ -36,6 +37,31 @@ export class TenantPrismaService {
       this.extendedClient = this.construirClienteComEscopo(this.empresaId);
     }
     return this.extendedClient;
+  }
+
+  /**
+   * Transação interativa com o contexto de tenant já aplicado — para
+   * operações que precisam de várias escritas atômicas (ex.: baixa = linha de
+   * baixa + saldo do título + saldo da conta + auditoria). O `client`
+   * acima roda cada operação na própria transação, então não serve pra isso.
+   * O `tx` recebido é o client "cru" da transação: o SET LOCAL feito aqui vale
+   * para todas as queries dela, e é o que satisfaz o RLS.
+   */
+  transaction<T>(fn: (tx: Prisma.TransactionClient) => Promise<T>): Promise<T> {
+    const empresaId = this.empresaId;
+    return this.prisma.$transaction(async (tx) => {
+      await tx.$executeRaw`SELECT set_config('app.current_empresa_id', ${empresaId}, true)`;
+      return fn(tx);
+    });
+  }
+
+  // Autor da ação, sempre vindo do token — nunca de parâmetro do chamador.
+  get userId(): string {
+    const userId = this.request.user?.sub;
+    if (!userId) {
+      throw new Error("TenantPrismaService foi injetado fora de uma request autenticada.");
+    }
+    return userId;
   }
 
   // Exposto para serviços que precisam montar o valor de `empresaId` de uma
