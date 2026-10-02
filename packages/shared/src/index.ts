@@ -14,3 +14,6 @@ export type HealthResponse = z.infer<typeof healthResponseSchema>;
 
 export * from "./schemas/auth";
 export * from "./schemas/cadastros";
+export * from "./schemas/money";
+export * from "./schemas/financeiro";
+export * from "./domain/baixa";

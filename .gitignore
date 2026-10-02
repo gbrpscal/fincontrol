@@ -1,7 +1,5 @@
-# Documentação estratégica e config local do Claude Code — ficam só no disco
-# local, não vão para o Git/GitHub. Claude Code continua lendo/usando esses
-# arquivos normalmente (leitura e comandos customizados são do filesystem,
-# não dependem de rastreamento no Git).
+# Documentação estratégica e configuração local de ferramental interno —
+# ficam só no disco local, não vão para o Git/GitHub.
 CLAUDE.md
 /docs/
 /.claude/
